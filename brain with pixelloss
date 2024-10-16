@@ -1,276 +1,221 @@
-{
-  "nbformat": 4,
-  "nbformat_minor": 0,
-  "metadata": {
-    "colab": {
-      "provenance": [],
-      "authorship_tag": "ABX9TyNUbKB5Vx6XBCnh8a5r9q9H",
-      "include_colab_link": true
-    },
-    "kernelspec": {
-      "name": "python3",
-      "display_name": "Python 3"
-    },
-    "language_info": {
-      "name": "python"
-    }
-  },
-  "cells": [
-    {
-      "cell_type": "markdown",
-      "metadata": {
-        "id": "view-in-github",
-        "colab_type": "text"
-      },
-      "source": [
-        "<a href=\"https://colab.research.google.com/github/Nahiyan47/brain_image_modality_transformation/blob/projectdemo1kazi/brain%20with%20pixelloss\" target=\"_parent\"><img src=\"https://colab.research.google.com/assets/colab-badge.svg\" alt=\"Open In Colab\"/></a>"
-      ]
-    },
-    {
-      "cell_type": "code",
-      "execution_count": null,
-      "metadata": {
-        "id": "xYK7cV_0KT6K"
-      },
-      "outputs": [],
-      "source": [
-        "import os\n",
-        "import numpy as np\n",
-        "import torch\n",
-        "import torch.nn as nn\n",
-        "import torch.optim as optim\n",
-        "import torch.utils.data as data\n",
-        "import nibabel as nib\n",
-        "import matplotlib.pyplot as plt\n",
-        "from torch.utils.data import random_split\n",
-        "\n",
-        "# Upgrade torchmetrics\n",
-        "!pip install --upgrade torchmetrics\n",
-        "\n",
-        "# Import the corrected SSIM class\n",
-        "from torchmetrics import StructuralSimilarityIndexMeasure as SSIM\n",
-        "\n",
-        "# Set device\n",
-        "device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')\n",
-        "print(f'Using device: {device}')\n",
-        "\n",
-        "# Custom Dataset Class\n",
-        "class BrainTumorDataset(data.Dataset):\n",
-        "    def __init__(self, root_dir):\n",
-        "        self.root_dir = root_dir\n",
-        "        self.file_names = sorted(os.listdir(self.root_dir))\n",
-        "        self.slice_info = []  # List to hold (volume_idx, slice_idx) pairs\n",
-        "\n",
-        "        # Build a list of all slices across all volumes\n",
-        "        for volume_idx, file_name in enumerate(self.file_names):\n",
-        "            file_path = os.path.join(self.root_dir, file_name)\n",
-        "            image_data = nib.load(file_path).get_fdata()\n",
-        "            num_slices = image_data.shape[2]  # Assuming slices are along the third dimension\n",
-        "            for slice_idx in range(num_slices):\n",
-        "                self.slice_info.append((volume_idx, slice_idx))\n",
-        "\n",
-        "    def __len__(self):\n",
-        "        return len(self.slice_info)\n",
-        "\n",
-        "    def __getitem__(self, idx):\n",
-        "        volume_idx, slice_idx = self.slice_info[idx]\n",
-        "        file_path = os.path.join(self.root_dir, self.file_names[volume_idx])\n",
-        "        image_data = nib.load(file_path).get_fdata()\n",
-        "\n",
-        "        # Load FLAIR and T2w modalities (assuming they are at index 0 and 3 respectively)\n",
-        "        flair_slice = torch.tensor(image_data[:, :, slice_idx, 0], dtype=torch.float32)\n",
-        "        t2w_slice = torch.tensor(image_data[:, :, slice_idx, 3], dtype=torch.float32)\n",
-        "\n",
-        "        # Normalize the slices to range [0, 1]\n",
-        "        flair_slice = (flair_slice - flair_slice.min()) / (flair_slice.max() - flair_slice.min() + 1e-8)\n",
-        "        t2w_slice = (t2w_slice - t2w_slice.min()) / (t2w_slice.max() - t2w_slice.min() + 1e-8)\n",
-        "\n",
-        "        return flair_slice.unsqueeze(0), t2w_slice.unsqueeze(0)  # Shape: (1, H, W)\n",
-        "\n",
-        "# Verify and display available datasets\n",
-        "print(os.listdir('/kaggle/input/'))\n",
-        "\n",
-        "# Set the correct data path based on your dataset\n",
-        "data_path = '/kaggle/input/task01braintumour/Task01_BrainTumour/imagesTr/'\n",
-        "print(os.listdir(data_path))  # List the contents of the imagesTr folder\n",
-        "\n",
-        "# Initialize dataset\n",
-        "dataset = BrainTumorDataset(data_path)\n",
-        "\n",
-        "# Split dataset into training and test sets\n",
-        "train_size = int(0.8 * len(dataset))\n",
-        "test_size = len(dataset) - train_size\n",
-        "\n",
-        "train_dataset, test_dataset = random_split(dataset, [train_size, test_size])\n",
-        "\n",
-        "# Initialize DataLoaders\n",
-        "train_loader = data.DataLoader(train_dataset, batch_size=1, shuffle=True)\n",
-        "test_loader = data.DataLoader(test_dataset, batch_size=1, shuffle=False)\n",
-        "\n",
-        "# Define Generator and Discriminator\n",
-        "class Generator(nn.Module):\n",
-        "    def __init__(self):\n",
-        "        super(Generator, self).__init__()\n",
-        "        # Example architecture (feel free to modify)\n",
-        "        self.model = nn.Sequential(\n",
-        "            nn.Conv2d(1, 64, kernel_size=7, padding=3),\n",
-        "            nn.ReLU(),\n",
-        "            nn.Conv2d(64, 64, kernel_size=7, padding=3),\n",
-        "            nn.ReLU(),\n",
-        "            nn.Conv2d(64, 1, kernel_size=7, padding=3)\n",
-        "        )\n",
-        "\n",
-        "    def forward(self, x):\n",
-        "        return self.model(x)\n",
-        "\n",
-        "class Discriminator(nn.Module):\n",
-        "    def __init__(self):\n",
-        "        super(Discriminator, self).__init__()\n",
-        "        # Example architecture (feel free to modify)\n",
-        "        self.model = nn.Sequential(\n",
-        "            nn.Conv2d(1, 64, kernel_size=7, padding=3),\n",
-        "            nn.ReLU(),\n",
-        "            nn.Conv2d(64, 64, kernel_size=7, padding=3),\n",
-        "            nn.ReLU(),\n",
-        "            nn.Conv2d(64, 1, kernel_size=7, padding=3),\n",
-        "            nn.Sigmoid()\n",
-        "        )\n",
-        "\n",
-        "    def forward(self, x):\n",
-        "        return self.model(x)\n",
-        "\n",
-        "# Initialize models\n",
-        "G_flair_to_t2w = Generator().to(device)\n",
-        "G_t2w_to_flair = Generator().to(device)\n",
-        "D = Discriminator().to(device)\n",
-        "\n",
-        "# Loss functions\n",
-        "adversarial_criterion = nn.BCELoss()\n",
-        "pixelwise_criterion = nn.L1Loss()\n",
-        "lambda_cycle = 10  # Weight for cycle consistency loss\n",
-        "\n",
-        "# Optimizers\n",
-        "optimizer_G = optim.Adam(\n",
-        "    list(G_flair_to_t2w.parameters()) + list(G_t2w_to_flair.parameters()), lr=0.0002\n",
-        ")\n",
-        "optimizer_D = optim.Adam(D.parameters(), lr=0.0002)\n",
-        "\n",
-        "# Training loop\n",
-        "num_epochs = 2  # Adjust the number of epochs as needed\n",
-        "\n",
-        "# Function to display generated images\n",
-        "def show_generated_images(flair, fake_t2w, recovered_flair):\n",
-        "    # Convert tensors to numpy for visualization\n",
-        "    flair_img = flair.squeeze().cpu().detach().numpy()\n",
-        "    fake_t2w_img = fake_t2w.squeeze().cpu().detach().numpy()\n",
-        "    recovered_flair_img = recovered_flair.squeeze().cpu().detach().numpy()\n",
-        "\n",
-        "    # Plotting\n",
-        "    plt.figure(figsize=(12, 6))\n",
-        "    plt.subplot(1, 3, 1)\n",
-        "    plt.title(\"FLAIR\")\n",
-        "    plt.imshow(flair_img, cmap='gray')\n",
-        "    plt.axis('off')\n",
-        "\n",
-        "    plt.subplot(1, 3, 2)\n",
-        "    plt.title(\"Fake T2w\")\n",
-        "    plt.imshow(fake_t2w_img, cmap='gray')\n",
-        "    plt.axis('off')\n",
-        "\n",
-        "    plt.subplot(1, 3, 3)\n",
-        "    plt.title(\"Recovered FLAIR\")\n",
-        "    plt.imshow(recovered_flair_img, cmap='gray')\n",
-        "    plt.axis('off')\n",
-        "\n",
-        "    plt.show()\n",
-        "\n",
-        "# Training\n",
-        "for epoch in range(num_epochs):\n",
-        "    G_flair_to_t2w.train()\n",
-        "    G_t2w_to_flair.train()\n",
-        "    D.train()\n",
-        "\n",
-        "    for i, (flair, t2w) in enumerate(train_loader):\n",
-        "        flair = flair.to(device)\n",
-        "        t2w = t2w.to(device)\n",
-        "\n",
-        "        # ---------------------\n",
-        "        #  Train Discriminator\n",
-        "        # ---------------------\n",
-        "        optimizer_D.zero_grad()\n",
-        "\n",
-        "        # Real images\n",
-        "        real_output = D(t2w)\n",
-        "        real_labels = torch.ones_like(real_output).to(device)\n",
-        "        d_real_loss = adversarial_criterion(real_output, real_labels)\n",
-        "\n",
-        "        # Fake images\n",
-        "        fake_t2w = G_flair_to_t2w(flair)\n",
-        "        fake_output = D(fake_t2w.detach())\n",
-        "        fake_labels = torch.zeros_like(fake_output).to(device)\n",
-        "        d_fake_loss = adversarial_criterion(fake_output, fake_labels)\n",
-        "\n",
-        "        # Total Discriminator loss\n",
-        "        d_loss = (d_real_loss + d_fake_loss) / 2\n",
-        "        d_loss.backward()\n",
-        "        optimizer_D.step()\n",
-        "\n",
-        "        # -----------------\n",
-        "        #  Train Generators\n",
-        "        # -----------------\n",
-        "        optimizer_G.zero_grad()\n",
-        "\n",
-        "        # Adversarial loss\n",
-        "        fake_output = D(fake_t2w)\n",
-        "        g_adv_loss = adversarial_criterion(fake_output, real_labels)\n",
-        "\n",
-        "        # Cycle consistency loss\n",
-        "        recovered_flair = G_t2w_to_flair(fake_t2w)\n",
-        "        cycle_loss = pixelwise_criterion(recovered_flair, flair)\n",
-        "\n",
-        "        # Total Generator loss\n",
-        "        g_loss = g_adv_loss + lambda_cycle * cycle_loss\n",
-        "        g_loss.backward()\n",
-        "        optimizer_G.step()\n",
-        "\n",
-        "        if i % 100 == 0:\n",
-        "            print(\n",
-        "                f\"Epoch [{epoch+1}/{num_epochs}], Step [{i}/{len(train_loader)}], \"\n",
-        "                f\"G Loss: {g_loss.item():.4f}, D Loss: {d_loss.item():.4f}\"\n",
-        "            )\n",
-        "            show_generated_images(flair, fake_t2w, recovered_flair)\n",
-        "\n",
-        "# Evaluation\n",
-        "ssim_metric = SSIM(data_range=1.0).to(device)\n",
-        "mse_loss = nn.MSELoss()\n",
-        "\n",
-        "G_flair_to_t2w.eval()  # Set the model to evaluation mode\n",
-        "\n",
-        "ssim_scores = []\n",
-        "mse_scores = []\n",
-        "\n",
-        "with torch.no_grad():\n",
-        "    for flair, t2w in test_loader:\n",
-        "        flair = flair.to(device)\n",
-        "        t2w = t2w.to(device)\n",
-        "\n",
-        "        fake_t2w = G_flair_to_t2w(flair)\n",
-        "\n",
-        "        # Compute SSIM\n",
-        "        ssim_value = ssim_metric(fake_t2w, t2w)\n",
-        "        ssim_scores.append(ssim_value.item())\n",
-        "\n",
-        "        # Compute MSE\n",
-        "        mse_value = mse_loss(fake_t2w, t2w)\n",
-        "        mse_scores.append(mse_value.item())\n",
-        "\n",
-        "    avg_ssim = np.mean(ssim_scores)\n",
-        "    avg_mse = np.mean(mse_scores)\n",
-        "    print(f'Average SSIM: {avg_ssim:.4f}')\n",
-        "    print(f'Average MSE: {avg_mse:.4f}')\n",
-        "\n",
-        "print(\"Training and evaluation complete.\")"
-      ]
-    }
-  ]
-}
+import os
+import numpy as np
+import torch
+import torch.nn as nn
+import torch.optim as optim
+import torch.utils.data as data
+import nibabel as nib
+import matplotlib.pyplot as plt
+from torch.utils.data import random_split
+
+# Upgrade torchmetrics
+!pip install --upgrade torchmetrics
+
+# Import the corrected SSIM class
+from torchmetrics import StructuralSimilarityIndexMeasure as SSIM
+
+# Set device
+device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+print(f'Using device: {device}')
+
+# Custom Dataset Class with Random Shuffling of Slices
+class BrainTumorDataset(data.Dataset):
+    def __init__(self, root_dir):
+        self.root_dir = root_dir
+        self.file_names = sorted(os.listdir(self.root_dir))
+        self.slice_info = []  # List to hold (volume_idx, slice_idx) pairs
+
+        # Build a list of all slices across all volumes
+        for volume_idx, file_name in enumerate(self.file_names):
+            file_path = os.path.join(self.root_dir, file_name)
+            image_data = nib.load(file_path).get_fdata()
+            num_slices = image_data.shape[2]  # Assuming slices are along the third dimension
+            for slice_idx in range(num_slices):
+                self.slice_info.append((volume_idx, slice_idx))
+
+        # Shuffle the data to avoid consecutive slices
+        np.random.shuffle(self.slice_info)
+
+    def __len__(self):
+        return len(self.slice_info)
+
+    def __getitem__(self, idx):
+        volume_idx, slice_idx = self.slice_info[idx]
+        file_path = os.path.join(self.root_dir, self.file_names[volume_idx])
+        image_data = nib.load(file_path).get_fdata()
+
+        # Load FLAIR and T2w modalities (assuming they are at index 0 and 3 respectively)
+        flair_slice = torch.tensor(image_data[:, :, slice_idx, 0], dtype=torch.float32)
+        t2w_slice = torch.tensor(image_data[:, :, slice_idx, 3], dtype=torch.float32)
+
+        # Normalize the slices to range [0, 1]
+        flair_slice = (flair_slice - flair_slice.min()) / (flair_slice.max() - flair_slice.min() + 1e-8)
+        t2w_slice = (t2w_slice - t2w_slice.min()) / (t2w_slice.max() - t2w_slice.min() + 1e-8)
+
+        return flair_slice.unsqueeze(0), t2w_slice.unsqueeze(0)  # Shape: (1, H, W)
+
+# Set the correct data path based on your dataset
+data_path = '/kaggle/input/task01braintumour/Task01_BrainTumour/imagesTr/'
+print(os.listdir(data_path))  # List the contents of the imagesTr folder
+
+# Initialize dataset
+dataset = BrainTumorDataset(data_path)
+
+# Split dataset into training and test sets
+train_size = int(0.8 * len(dataset))
+test_size = len(dataset) - train_size
+
+train_dataset, test_dataset = random_split(dataset, [train_size, test_size])
+
+# Initialize DataLoaders
+train_loader = data.DataLoader(train_dataset, batch_size=1, shuffle=True)
+test_loader = data.DataLoader(test_dataset, batch_size=1, shuffle=False)
+
+# Define Generator and Discriminator
+class Generator(nn.Module):
+    def __init__(self):
+        super(Generator, self).__init__()
+        # Example architecture (feel free to modify)
+        self.model = nn.Sequential(
+            nn.Conv2d(1, 64, kernel_size=7, padding=3),
+            nn.ReLU(),
+            nn.Conv2d(64, 64, kernel_size=7, padding=3),
+            nn.ReLU(),
+            nn.Conv2d(64, 1, kernel_size=7, padding=3)  # No Sigmoid activation, for pixel-wise loss
+        )
+
+    def forward(self, x):
+        return self.model(x)
+
+class Discriminator(nn.Module):
+    def __init__(self):
+        super(Discriminator, self).__init__()
+        # Example architecture (feel free to modify)
+        self.model = nn.Sequential(
+            nn.Conv2d(1, 64, kernel_size=7, padding=3),
+            nn.ReLU(),
+            nn.Conv2d(64, 64, kernel_size=7, padding=3),
+            nn.ReLU(),
+            nn.Conv2d(64, 1, kernel_size=7, padding=3),
+            nn.Sigmoid()
+        )
+
+    def forward(self, x):
+        return self.model(x)
+
+# Initialize models
+G_flair_to_t2w = Generator().to(device)
+G_t2w_to_flair = Generator().to(device)
+D = Discriminator().to(device)
+
+# Loss functions
+adversarial_criterion = nn.BCELoss()
+pixelwise_criterion = nn.L1Loss()  # Pixel-wise loss (L1 Loss)
+lambda_cycle = 10  # Weight for cycle consistency loss
+
+# Optimizers
+optimizer_G = optim.Adam(
+    list(G_flair_to_t2w.parameters()) + list(G_t2w_to_flair.parameters()), lr=0.0002
+)
+optimizer_D = optim.Adam(D.parameters(), lr=0.0002)
+
+# Training loop
+num_epochs = 2  # Adjust the number of epochs as needed
+
+# Function to display generated images
+def show_generated_images(flair, fake_t2w, recovered_flair):
+    # Convert tensors to numpy for visualization
+    flair_img = flair.squeeze().cpu().detach().numpy()
+    fake_t2w_img = fake_t2w.squeeze().cpu().detach().numpy()
+    recovered_flair_img = recovered_flair.squeeze().cpu().detach().numpy()
+    
+    # Plotting
+    plt.figure(figsize=(12, 6))
+    plt.subplot(1, 3, 1)
+    plt.title("FLAIR")
+    plt.imshow(flair_img, cmap='gray')
+    plt.axis('off')
+    
+    plt.subplot(1, 3, 2)
+    plt.title("Fake T2w")
+    plt.imshow(fake_t2w_img, cmap='gray')
+    plt.axis('off')
+    
+    plt.subplot(1, 3, 3)
+    plt.title("Recovered FLAIR")
+    plt.imshow(recovered_flair_img, cmap='gray')
+    plt.axis('off')
+    
+    plt.show()
+
+# Training
+for epoch in range(num_epochs):
+    G_flair_to_t2w.train()
+    G_t2w_to_flair.train()
+    D.train()
+    
+    for i, (flair, t2w) in enumerate(train_loader):
+        flair = flair.to(device)
+        t2w = t2w.to(device)
+
+        # ---------------------
+        #  Train Discriminator
+        # ---------------------
+        optimizer_D.zero_grad()
+
+        # Real images
+        real_output = D(t2w)
+        real_labels = torch.ones_like(real_output).to(device)
+        d_real_loss = adversarial_criterion(real_output, real_labels)
+
+        # Fake images
+        fake_t2w = G_flair_to_t2w(flair)
+        fake_output = D(fake_t2w.detach())
+        fake_labels = torch.zeros_like(fake_output).to(device)
+        d_fake_loss = adversarial_criterion(fake_output, fake_labels)
+
+        # Total Discriminator loss
+        d_loss = (d_real_loss + d_fake_loss) / 2
+        d_loss.backward()
+        optimizer_D.step()
+
+        # -----------------
+        #  Train Generators
+        # -----------------
+        optimizer_G.zero_grad()
+
+        # Adversarial loss
+        fake_output = D(fake_t2w)
+        g_adv_loss = adversarial_criterion(fake_output, real_labels)
+
+        # Cycle consistency loss
+        recovered_flair = G_t2w_to_flair(fake_t2w)
+        cycle_loss = pixelwise_criterion(recovered_flair, flair)
+
+        # Total Generator loss
+        g_loss = g_adv_loss + lambda_cycle * cycle_loss
+        g_loss.backward()
+        optimizer_G.step()
+
+        if i % 100 == 0:
+            print(
+                f"Epoch [{epoch+1}/{num_epochs}], Step [{i}/{len(train_loader)}], "
+                f"G Loss: {g_loss.item():.4f}, D Loss: {d_loss.item():.4f}"
+            )
+            show_generated_images(flair, fake_t2w, recovered_flair)
+
+# Evaluation
+ssim_metric = SSIM(data_range=1.0).to(device)
+mse_loss = nn.MSELoss()
+
+G_flair_to_t2w.eval()  # Set the model to evaluation mode
+
+ssim_scores = []
+mse_scores = []
+
+with torch.no_grad():
+    for flair, t2w in test_loader:
+        flair = flair.to(device)
+        t2w = t2w.to(device)
+
+        fake_t2w
